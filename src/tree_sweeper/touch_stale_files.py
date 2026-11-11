@@ -6,6 +6,8 @@ safely accesses them based on file type, and logs unhandled files.
 Parallelized using ProcessPoolExecutor for multi-core batch processing.
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import mimetypes
@@ -14,6 +16,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import sys
+from typing import NamedTuple
 
 # Default directories and file patterns to ignore
 DEFAULT_IGNORED_DIRS = {
@@ -64,9 +67,11 @@ def get_file_handler(file_path: Path):
         return default_file_accessor
     return None
 
-def process_directory(dir_path: Path, cutoff_time: float, ignored_dirs: set, dry_run: bool) -> tuple[int, int, list[str]]:
+def process_directory(dir_path: Path, cutoff_time: float, ignored_dirs: set, dry_run: bool,
+                      recursive: bool = True) -> tuple[int, int, list[str]]:
     """
     Walks a single directory subtree, checking file access times.
+    With recursive=False only the files directly inside dir_path are checked.
     Returns: (processed_count, skipped_unhandled_count, unhandled_paths)
     """
     processed = 0
@@ -80,7 +85,7 @@ def process_directory(dir_path: Path, cutoff_time: float, ignored_dirs: set, dry
                 try:
                     # Skip ignored directories
                     if entry.is_dir(follow_symlinks=False):
-                        if entry.name in ignored_dirs:
+                        if not recursive or entry.name in ignored_dirs:
                             continue
                         # Recursively process subdirectories
                         sub_processed, sub_skipped, sub_unhandled = process_directory(
@@ -128,79 +133,125 @@ def process_directory(dir_path: Path, cutoff_time: float, ignored_dirs: set, dry
 
     return processed, skipped_unhandled, unhandled_paths
 
-def main():
-    parser = argparse.ArgumentParser(description="Exhaustively traverse and touch/access stale files older than 1 year.")
-    parser.add_argument("--paths", nargs="+", required=True, help="Top-level folder paths to scan.")
-    parser.add_argument("--days", type=int, format=int, default=365, help="Access age threshold in days (default: 365).")
-    parser.add_argument("--log-file", default="stale_file_access.log", help="Path to log file.")
-    parser.add_argument("--ignore-dir", nargs="*", default=[], help="Additional directories to ignore.")
-    parser.add_argument("--dry-run", action="store_true", help="Scan and log without actually accessing files.")
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel worker processes.")
-    parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
+class ScanJob(NamedTuple):
+    path: Path
+    recursive: bool
 
-    args = parser.parse_args()
 
-    setup_logging(args.log_file, args.verbose)
+class SweepResult(NamedTuple):
+    processed: int
+    skipped: int
+    unhandled: list[str]
 
-    ignored_dirs = DEFAULT_IGNORED_DIRS.union(set(args.ignore_dir))
-    cutoff_time = time.time() - (args.days * 86400)
 
-    logging.info(f"Starting stale file sweep. Threshold: {args.days} days. Dry run: {args.dry_run}")
-    logging.info(f"Top-level paths: {args.paths}")
-    logging.info(f"Ignored directories: {ignored_dirs}")
-
-    # Gather top-level subdirectories to distribute work across worker processes
-    subdirectories_to_scan = []
-    for root_path in args.paths:
+def deduplicate_roots(paths: list[str]) -> list[Path]:
+    """
+    Resolves the given top-level paths and drops duplicates and paths nested
+    inside another given path, so no subtree is scanned more than once.
+    """
+    resolved = []
+    for root_path in paths:
         root = Path(root_path).resolve()
         if not root.exists():
             logging.error(f"Root path does not exist: {root}")
             continue
-        
+        if root not in resolved:
+            resolved.append(root)
+
+    roots = []
+    for root in resolved:
+        enclosing = next((other for other in resolved if other in root.parents), None)
+        if enclosing is not None:
+            logging.warning(f"Skipping {root}: already covered by {enclosing}")
+            continue
+        roots.append(root)
+    return roots
+
+
+def collect_scan_jobs(roots: list[Path], ignored_dirs: set) -> list[ScanJob]:
+    """
+    Splits each root into one recursive job per non-ignored subdirectory, plus a
+    single non-recursive job for the files located directly in the root.
+    """
+    jobs = []
+    for root in roots:
+        has_top_level_files = False
         try:
             with os.scandir(root) as entries:
                 for entry in entries:
                     if entry.is_dir(follow_symlinks=False):
                         if entry.name not in ignored_dirs:
-                            subdirectories_to_scan.append(Path(entry.path))
+                            jobs.append(ScanJob(Path(entry.path), recursive=True))
                     elif entry.is_file(follow_symlinks=False):
-                        # Handle top-level files directly in root
-                        subdirectories_to_scan.append(root) # Handled collectively or as pseudo-batch
-                        break
+                        has_top_level_files = True
         except Exception as e:
             logging.error(f"Error reading root path {root}: {e}")
+            continue
+        if has_top_level_files:
+            jobs.append(ScanJob(root, recursive=False))
+    return jobs
+
+
+def sweep(paths: list[str], days: int, ignored_dirs: set, dry_run: bool, workers: int) -> SweepResult:
+    cutoff_time = time.time() - (days * 86400)
+    jobs = collect_scan_jobs(deduplicate_roots(paths), ignored_dirs)
 
     total_processed = 0
     total_skipped = 0
     all_unhandled = []
 
     # Parallel execution using ProcessPoolExecutor
-    start_time = time.time()
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+    with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(process_directory, subdir, cutoff_time, ignored_dirs, args.dry_run): subdir
-            for subdir in subdirectories_to_scan
+            executor.submit(process_directory, job.path, cutoff_time, ignored_dirs, dry_run, job.recursive): job
+            for job in jobs
         }
 
         for future in as_completed(futures):
-            subdir = futures[future]
+            job = futures[future]
             try:
                 proc, skip, unhandled = future.result()
                 total_processed += proc
                 total_skipped += skip
                 all_unhandled.extend(unhandled)
             except Exception as e:
-                logging.error(f"Subtask failed for {subdir}: {e}")
+                logging.error(f"Subtask failed for {job.path}: {e}")
 
+    return SweepResult(total_processed, total_skipped, all_unhandled)
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Exhaustively traverse and touch/access stale files older than 1 year.")
+    parser.add_argument("--paths", nargs="+", required=True, help="Top-level folder paths to scan.")
+    parser.add_argument("--days", type=int, default=365, help="Access age threshold in days (default: 365).")
+    parser.add_argument("--log-file", default="stale_file_access.log", help="Path to log file.")
+    parser.add_argument("--ignore-dir", nargs="*", default=[], help="Additional directories to ignore.")
+    parser.add_argument("--dry-run", action="store_true", help="Scan and log without actually accessing files.")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel worker processes.")
+    parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
+
+    args = parser.parse_args(argv)
+
+    setup_logging(args.log_file, args.verbose)
+
+    ignored_dirs = DEFAULT_IGNORED_DIRS.union(set(args.ignore_dir))
+
+    logging.info(f"Starting stale file sweep. Threshold: {args.days} days. Dry run: {args.dry_run}")
+    logging.info(f"Top-level paths: {args.paths}")
+    logging.info(f"Ignored directories: {ignored_dirs}")
+
+    start_time = time.time()
+    result = sweep(args.paths, args.days, ignored_dirs, args.dry_run, args.workers)
     duration = time.time() - start_time
+
     logging.info("=== Sweep Completed ===")
     logging.info(f"Duration: {duration:.2f} seconds")
-    logging.info(f"Files successfully accessed: {total_processed}")
-    logging.info(f"Unhandled/skipped files logged: {total_skipped}")
-    if all_unhandled:
+    logging.info(f"Files successfully accessed: {result.processed}")
+    logging.info(f"Unhandled/skipped files logged: {result.skipped}")
+    if result.unhandled:
         unhandled_log = "unhandled_stale_files.txt"
         with open(unhandled_log, "w", encoding="utf-8") as f:
-            f.write("\n".join(all_unhandled) + "\n")
+            f.write("\n".join(result.unhandled) + "\n")
         logging.info(f"Unhandled file paths written to {unhandled_log}")
 
 if __name__ == "__main__":

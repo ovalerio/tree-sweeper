@@ -5,6 +5,8 @@ Parses log files or unhandled file lists, inspects file metadata (size, atime),
 and outputs a comprehensive breakdown report by extension, size bracket, and age bracket.
 """
 
+from __future__ import annotations
+
 import argparse
 from collections import defaultdict
 import datetime
@@ -86,7 +88,7 @@ def generate_report(paths: list[Path]) -> dict:
 
     for p in paths:
         try:
-            stat = p.stat(follow_symlinks=False)
+            stat = p.lstat()
             size = stat.st_size
             atime = stat.st_atime
             age_days = (current_time - atime) / 86400

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tree-sweeper"
+dynamic = ["version"]
+description = "Traverse large (GPFS) directory trees, refresh the access time of stale files and report on them."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Omar Valerio" }]
+requires-python = ">=3.8"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Filesystems",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+touch-stale-files = "tree_sweeper.touch_stale_files:main"
+analyze-stale-files = "tree_sweeper.analyze_stale_files:main"
+
+[project.urls]
+Homepage = "https://github.com/ovalerio/tree-sweeper"
+
+[tool.setuptools.dynamic]
+version = { attr = "tree_sweeper.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

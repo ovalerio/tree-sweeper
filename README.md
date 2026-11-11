@@ -10,7 +10,7 @@ The toolkit is split into two complementary pipelines:
 
 1. **The Sweeper (`touch_stale_files.py`)**:
 * Recursively traverses top-level directory trees using high-performance system calls (`os.scandir`).
-* Distributes subdirectories across multiple worker processes (`ProcessPoolExecutor`) for parallel execution.
+* Distributes subdirectories across multiple worker processes (`ProcessPoolExecutor`) for parallel execution. Files located directly in a top-level path are handled by a separate non-recursive job, and duplicate or nested `--paths` are collapsed, so every file is visited exactly once.
 * Filters out common version control directories, build caches, and virtual environments.
 * Checks file access time (`st_atime`) against a configurable age threshold (default: 365 days).
 * Safely "touches" stale files by reading a small 4KB chunk (`buffering=0`) to trigger filesystem-level `atime` updates without loading heavy files into memory.
@@ -41,8 +41,24 @@ To protect internal tool states, virtual environments, and build artifacts, the 
 
 ## Installation & Requirements
 
-* **Python:** 3.10 or higher
+* **Python:** 3.8 or higher
 * **Dependencies:** Standard library only (`argparse`, `pathlib`, `concurrent.futures`, `os`, `logging`, `mimetypes`, `collections`). No external pip packages required.
+
+The scripts can be run directly from a clone of the repository, or the toolkit can be installed as a package, which provides the `touch-stale-files` and `analyze-stale-files` commands:
+
+```bash
+pip install .                                            # from a local clone
+pip install git+https://github.com/ovalerio/tree-sweeper.git   # without cloning
+```
+
+### Running the Tests
+
+The test suite uses `pytest` and can be run from the repository root, with or without installing the package:
+
+```bash
+pip install -e ".[test]"   # optional: editable install including pytest
+python -m pytest
+```
 
 ---
 
@@ -52,6 +68,8 @@ To protect internal tool states, virtual environments, and build artifacts, the 
 
 ```bash
 python3 touch_stale_files.py --paths <PATH_1> [PATH_2 ...] [OPTIONS]
+# or, when installed as a package:
+touch-stale-files --paths <PATH_1> [PATH_2 ...] [OPTIONS]
 
 ```
 
@@ -94,6 +112,8 @@ python3 touch_stale_files.py \
 
 ```bash
 python3 analyze_stale_files.py --input <LOG_OR_TXT_FILE> [OPTIONS]
+# or, when installed as a package:
+analyze-stale-files --input <LOG_OR_TXT_FILE> [OPTIONS]
 
 ```
 
