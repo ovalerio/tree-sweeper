@@ -34,7 +34,7 @@ To protect internal tool states, virtual environments, and build artifacts, the 
 * **Version Control & IDEs:** `.git`, `.svn`, `.hg`, `.vscode`, `.idea`
 * **Caches & Build Artifacts:** `.cache`, `__pycache__`, `.pytest_cache`, `node_modules`, `build`, `dist`
 * **Environments & Containers:** `.conda`, `miniconda`, `anaconda`, `venv`, `.venv`, `.apptainer`, `.singularity`
-* **System & Snapshots:** `.snapshot`, `.Trash-*`, `lost+found`
+* **System & Snapshots:** `.snapshot`, `.snapshots`, `.Trash-*`, `lost+found`
 * **Temporary Files:** `.lock`, `.tmp`, `.log`, `.swp`, `.swo`
 
 ---

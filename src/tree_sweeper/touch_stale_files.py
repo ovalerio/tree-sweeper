@@ -23,7 +23,8 @@ DEFAULT_IGNORED_DIRS = {
     ".git", ".svn", ".hg", ".vscode", ".idea", ".cache", 
     "__pycache__", ".pytest_cache", "node_modules", "build", 
     "dist", ".conda", ".miniconda", ".anaconda", "venv", 
-    ".venv", ".apptainer", ".singularity", ".snapshot", "lost+found"
+    ".venv", ".apptainer", ".singularity", ".snapshot", 
+    ".snapshots", "lost+found", ".Trash"
 }
 
 DEFAULT_IGNORED_EXTENSIONS = {
