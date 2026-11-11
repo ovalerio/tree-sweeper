@@ -15,6 +15,7 @@ from pathlib import Path
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
+import re
 import sys
 from typing import NamedTuple
 
@@ -30,6 +31,14 @@ DEFAULT_IGNORED_DIRS = {
 DEFAULT_IGNORED_EXTENSIONS = {
     ".lock", ".tmp", ".log", ".swp", ".swo"
 }
+
+def format_name_list(names) -> str:
+    """
+    Joins names in alphabetical order, ignoring case and non-alphanumeric
+    characters (e.g. '.venv' sorts as 'venv', '__pycache__' as 'pycache').
+    """
+    ordered = sorted(names, key=lambda name: (re.sub(r"[^0-9a-z]", "", name.lower()), name))
+    return ", ".join(ordered)
 
 def setup_logging(log_path: str, verbose: bool):
     level = logging.DEBUG if verbose else logging.INFO
@@ -239,7 +248,7 @@ def main(argv: list[str] | None = None):
 
     logging.info(f"Starting stale file sweep. Threshold: {args.days} days. Dry run: {args.dry_run}")
     logging.info(f"Top-level paths: {args.paths}")
-    logging.info(f"Ignored directories: {ignored_dirs}")
+    logging.info(f"Ignored directories ({len(ignored_dirs)}): {format_name_list(ignored_dirs)}")
 
     start_time = time.time()
     result = sweep(args.paths, args.days, ignored_dirs, args.dry_run, args.workers)

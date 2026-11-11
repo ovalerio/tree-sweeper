@@ -6,13 +6,21 @@ from pathlib import Path
 import pytest
 
 import tree_sweeper
-from tree_sweeper.touch_stale_files import DEFAULT_IGNORED_DIRS, sweep
+from tree_sweeper.touch_stale_files import DEFAULT_IGNORED_DIRS, format_name_list, sweep
 
 from conftest import STALE_ATIME
 
 
 def run_sweep(paths, dry_run=True, ignored_dirs=DEFAULT_IGNORED_DIRS):
     return sweep([str(p) for p in paths], days=365, ignored_dirs=ignored_dirs, dry_run=dry_run, workers=2)
+
+
+def test_format_name_list_ignores_case_and_special_characters():
+    names = {"venv", ".venv", "__pycache__", ".Trash", "build", "lost+found", ".snapshots", ".snapshot"}
+
+    assert format_name_list(names) == (
+        "build, lost+found, __pycache__, .snapshot, .snapshots, .Trash, .venv, venv"
+    )
 
 
 def test_dry_run_counts_stale_file_without_accessing_it(tmp_path, make_file):
