@@ -1,19 +1,42 @@
 #!/usr/bin/env python3
 """
 Stale File Analysis & Report Generator
-Parses log files or unhandled file lists, inspects file metadata (size, atime),
-and outputs a comprehensive breakdown report by extension, size bracket, and age bracket.
+Parses log files or unhandled file lists and inspects file metadata (size, atime),
+or reads the stale file list CSV written by touch_stale_files.py --stale-list (which holds
+the original size and atime), and outputs a breakdown report by extension, size bracket,
+and age bracket.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import csv
 import datetime
 from pathlib import Path
 import re
 import sys
 import time
+from typing import Iterable, Iterator, NamedTuple
+
+AGE_ORDER = ["< 1 year", "1 - 2 years", "2 - 3 years", "3 - 5 years", "> 5 years"]
+SIZE_ORDER = ["< 1 MB", "1 MB - 100 MB", "100 MB - 1 GB", "1 GB - 10 GB", "> 10 GB"]
+
+class FileRecord(NamedTuple):
+    path: Path
+    size: int
+    atime: float
+
+def is_stale_list(file_path: Path) -> bool:
+    """True if file_path is a CSV file written by touch_stale_files.py --stale-list."""
+    with open(file_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+        return f.readline().startswith("path,size_bytes,atime_epoch")
+
+def read_stale_list(file_path: Path) -> Iterator[FileRecord]:
+    """Yields the files recorded in a --stale-list CSV, with their original size and atime."""
+    with open(file_path, "r", newline="", encoding="utf-8", errors="surrogateescape") as f:
+        for row in csv.DictReader(f):
+            yield FileRecord(Path(row["path"]), int(row["size_bytes"]), float(row["atime_epoch"]))
 
 def parse_paths_from_file(file_path: Path) -> list[Path]:
     """
@@ -66,8 +89,10 @@ def categorize_age(days: float) -> str:
         return "3 - 5 years"
     elif years >= 2:
         return "2 - 3 years"
-    else:
+    elif years >= 1:
         return "1 - 2 years"
+    else:
+        return "< 1 year"
 
 def format_size(size_bytes: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -77,44 +102,46 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.2f} PB"
 
 def generate_report(paths: list[Path]) -> dict:
-    ext_stats = defaultdict(lambda: {"count": 0, "total_size": 0})
-    size_brackets = defaultdict(lambda: {"count": 0, "total_size": 0})
-    age_brackets = defaultdict(lambda: {"count": 0, "total_size": 0})
-    
-    total_files = 0
+    """Builds the report from the current (live) size and atime of the given paths."""
+    records = []
     total_missing = 0
-    grand_total_size = 0
-    current_time = time.time()
-
     for p in paths:
         try:
             stat = p.lstat()
-            size = stat.st_size
-            atime = stat.st_atime
-            age_days = (current_time - atime) / 86400
-
-            total_files += 1
-            grand_total_size += size
-
-            # Extension
-            ext = p.suffix.lower() if p.suffix else "(no extension)"
-            ext_stats[ext]["count"] += 1
-            ext_stats[ext]["total_size"] += size
-
-            # Size Bracket
-            s_bracket = categorize_size(size)
-            size_brackets[s_bracket]["count"] += 1
-            size_brackets[s_bracket]["total_size"] += size
-
-            # Age Bracket
-            a_bracket = categorize_age(age_days)
-            age_brackets[a_bracket]["count"] += 1
-            age_brackets[a_bracket]["total_size"] += size
-
-        except (FileNotFoundError, PermissionError):
-            total_missing += 1
+            records.append(FileRecord(p, stat.st_size, stat.st_atime))
         except Exception:
             total_missing += 1
+    return summarize_records(records, total_missing)
+
+def summarize_records(records: Iterable[FileRecord], total_missing: int = 0) -> dict:
+    ext_stats = defaultdict(lambda: {"count": 0, "total_size": 0})
+    size_brackets = defaultdict(lambda: {"count": 0, "total_size": 0})
+    age_brackets = defaultdict(lambda: {"count": 0, "total_size": 0})
+
+    total_files = 0
+    grand_total_size = 0
+    current_time = time.time()
+
+    for p, size, atime in records:
+        age_days = (current_time - atime) / 86400
+
+        total_files += 1
+        grand_total_size += size
+
+        # Extension
+        ext = p.suffix.lower() if p.suffix else "(no extension)"
+        ext_stats[ext]["count"] += 1
+        ext_stats[ext]["total_size"] += size
+
+        # Size Bracket
+        s_bracket = categorize_size(size)
+        size_brackets[s_bracket]["count"] += 1
+        size_brackets[s_bracket]["total_size"] += size
+
+        # Age Bracket
+        a_bracket = categorize_age(age_days)
+        age_brackets[a_bracket]["count"] += 1
+        age_brackets[a_bracket]["total_size"] += size
 
     return {
         "total_files": total_files,
@@ -138,18 +165,18 @@ def print_markdown_report(report: dict, output_file: str = None):
     output.append("| Age Bracket | File Count | Percentage | Total Size |")
     output.append("| :--- | ---: | ---: | ---: |")
     total_files = report["total_files"] or 1
-    for bracket in sorted(report["age_brackets"].keys()):
-        data = report["age_brackets"][bracket]
-        pct = (data["count"] / total_files) * 100
-        output.append(f"| {bracket} | {data['count']:,} | {pct:.1f}% | {format_size(data['total_size'])} |")
+    for bracket in AGE_ORDER:
+        if bracket in report["age_brackets"]:
+            data = report["age_brackets"][bracket]
+            pct = (data["count"] / total_files) * 100
+            output.append(f"| {bracket} | {data['count']:,} | {pct:.1f}% | {format_size(data['total_size'])} |")
     output.append("")
 
     # Size Brackets
     output.append("## Breakdown by Size Bracket")
     output.append("| Size Bracket | File Count | Percentage | Total Size |")
     output.append("| :--- | ---: | ---: | ---: |")
-    size_order = ["< 1 MB", "1 MB - 100 MB", "100 MB - 1 GB", "1 GB - 10 GB", "> 10 GB"]
-    for bracket in size_order:
+    for bracket in SIZE_ORDER:
         if bracket in report["size_brackets"]:
             data = report["size_brackets"][bracket]
             pct = (data["count"] / total_files) * 100
@@ -175,7 +202,9 @@ def print_markdown_report(report: dict, output_file: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze stale files from sweeper logs or path lists.")
-    parser.add_argument("--input", required=True, help="Path to unhandled_stale_files.txt or sweep log file.")
+    parser.add_argument("--input", required=True,
+                        help="Path to a stale file list CSV (touch_stale_files.py --stale-list), "
+                             "unhandled_stale_files.txt or sweep log file.")
     parser.add_argument("--output", default="stale_files_report.md", help="Path to save Markdown report.")
 
     args = parser.parse_args()
@@ -185,11 +214,14 @@ def main():
         print(f"Input file not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Parsing paths from {input_path}...")
-    paths = parse_paths_from_file(input_path)
-    print(f"Extracted {len(paths):,} paths. Inspecting file system metadata...")
-
-    report = generate_report(paths)
+    if is_stale_list(input_path):
+        print(f"Reading recorded sizes and access times from stale file list {input_path}...")
+        report = summarize_records(read_stale_list(input_path))
+    else:
+        print(f"Parsing paths from {input_path}...")
+        paths = parse_paths_from_file(input_path)
+        print(f"Extracted {len(paths):,} paths. Inspecting file system metadata...")
+        report = generate_report(paths)
     print_markdown_report(report, args.output)
 
 if __name__ == "__main__":

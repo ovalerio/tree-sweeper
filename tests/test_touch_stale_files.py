@@ -1,3 +1,4 @@
+import csv
 import os
 import subprocess
 import sys
@@ -11,8 +12,14 @@ from tree_sweeper.touch_stale_files import DEFAULT_IGNORED_DIRS, format_name_lis
 from conftest import STALE_ATIME
 
 
-def run_sweep(paths, dry_run=True, ignored_dirs=DEFAULT_IGNORED_DIRS):
-    return sweep([str(p) for p in paths], days=365, ignored_dirs=ignored_dirs, dry_run=dry_run, workers=2)
+def run_sweep(paths, dry_run=True, ignored_dirs=DEFAULT_IGNORED_DIRS, stale_list=None):
+    return sweep([str(p) for p in paths], days=365, ignored_dirs=ignored_dirs, dry_run=dry_run, workers=2,
+                 stale_list=stale_list)
+
+
+def read_csv(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
 def test_format_name_list_ignores_case_and_special_characters():
@@ -89,6 +96,45 @@ def test_access_reads_stale_files_and_reports_unreadable_ones(tmp_path, make_fil
     assert result.unhandled == [str(unreadable.resolve())]
 
 
+def test_stale_list_records_original_size_and_atime_before_access(tmp_path, make_file):
+    root = tmp_path / "root"
+    make_file(root / "top.dat", content=b"x" * 10_000)
+    make_file(root / "sub1" / "a.txt", content=b"abc")
+    make_file(root / "sub2" / "nested" / "b.txt")
+    make_file(root / "sub2" / "fresh.txt", stale=False)
+    make_file(root / "sub2" / "data.tmp")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stale_list = out_dir / "stale.csv"
+
+    result = run_sweep([root], dry_run=False, stale_list=str(stale_list))
+
+    rows = {Path(r["path"]).name: r for r in read_csv(stale_list)}
+    assert result.processed == 3
+    assert set(rows) == {"top.dat", "a.txt", "b.txt"}
+    assert {r["status"] for r in rows.values()} == {"accessed"}
+    assert all(float(r["atime_epoch"]) == STALE_ATIME for r in rows.values())
+    assert rows["top.dat"]["size_bytes"] == "10000"
+    assert rows["a.txt"]["size_bytes"] == "3"
+    assert [p.name for p in out_dir.iterdir()] == ["stale.csv"]
+
+
+def test_stale_list_marks_files_that_could_not_be_accessed(tmp_path, make_file):
+    if os.geteuid() == 0:
+        pytest.skip("root can read files regardless of permissions")
+    unreadable = make_file(tmp_path / "root" / "sub" / "unreadable.txt")
+    unreadable.chmod(0)
+    stale_list = tmp_path / "stale.csv"
+
+    try:
+        run_sweep([tmp_path / "root"], dry_run=False, stale_list=str(stale_list))
+    finally:
+        unreadable.chmod(0o644)
+
+    rows = read_csv(stale_list)
+    assert [(Path(r["path"]).name, r["status"]) for r in rows] == [("unreadable.txt", "failed")]
+
+
 def test_cli_dry_run(tmp_path, make_file):
     root = tmp_path / "root"
     make_file(root / "top.txt")
@@ -99,7 +145,8 @@ def test_cli_dry_run(tmp_path, make_file):
 
     completed = subprocess.run(
         [sys.executable, "-m", "tree_sweeper.touch_stale_files",
-         "--paths", str(root), "--days", "365", "--workers", "2", "--dry-run", "--log-file", str(log_file)],
+         "--paths", str(root), "--days", "365", "--workers", "2", "--dry-run", "--log-file", str(log_file),
+         "--stale-list", "stale.csv"],
         cwd=tmp_path, env=env, capture_output=True, text=True,
     )
 
@@ -107,3 +154,19 @@ def test_cli_dry_run(tmp_path, make_file):
     log = log_file.read_text()
     assert log.count("[DRY-RUN] Would access stale file") == 2
     assert "Files successfully accessed: 2" in log
+    assert [r["status"] for r in read_csv(tmp_path / "stale.csv")] == ["dry_run", "dry_run"]
+
+
+def test_cli_rejects_stale_list_in_missing_directory(tmp_path):
+    src_dir = Path(tree_sweeper.__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONPATH": str(src_dir)}
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "tree_sweeper.touch_stale_files",
+         "--paths", str(tmp_path), "--stale-list", str(tmp_path / "missing" / "stale.csv")],
+        cwd=tmp_path, env=env, capture_output=True, text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "--stale-list" in completed.stderr
+    assert not (tmp_path / "stale_file_access.log").exists()

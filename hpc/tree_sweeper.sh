@@ -14,4 +14,5 @@ python3 touch_stale_files.py \
     --days 365 \
     --workers 16 \
     --ignore-dir custom_scratch backup_old \
-    --log-file stale_sweep_run.log
+    --log-file stale_sweep_run.log \
+    --stale-list stale_files.csv
